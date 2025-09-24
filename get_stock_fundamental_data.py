@@ -20,6 +20,11 @@ pd.set_option('display.max_rows', 500)
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.width', 1000)
 
+DATE_COLUMNS_PRIORITY = [
+    '报告期', '报告日', '公告日期', '公告时间', '股东户数公告日期', '股东户数统计截止日',
+    '统计截止日', '日期', '交易日期', '变动日期', '截止日期', '发布时间', '数据日期',
+]
+
 
 def get_stock_code_prefix(stock_code: str) -> str:
     """判断股票代码的市场前缀"""
@@ -164,6 +169,17 @@ def get_fundamental_data(stock_code: str):
     print(f"\n--- 股票 {stock_code} 基本面数据获取完成 ---")
     return fundamental_data
 
+
+def sort_dataframe_by_date(df: pd.DataFrame) -> pd.DataFrame:
+    """按照常见日期字段降序排列，若无法识别有效日期则原样返回。"""
+    for column in DATE_COLUMNS_PRIORITY:
+        if column in df.columns:
+            df_sorted = df.copy()
+            df_sorted[column] = pd.to_datetime(df_sorted[column], errors='coerce')
+            if df_sorted[column].notna().any():
+                return df_sorted.sort_values(by=column, ascending=False)
+    return df
+
 def clean_and_format_df(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     """
     对特定的 DataFrame 进行清洗和格式化，以提高可读性。
@@ -237,32 +253,37 @@ def save_summary_to_txt(stock_code: str, data_dict: dict):
                 if name in data_dict and data_dict[name] is not None and not data_dict[name].empty:
                     df = data_dict[name].copy()
                     f.write(f"--------- {name} ---------\n")
-                    
+
                     summary_df = None
                     if summary_type == 'latest_date_table' and '报告日期' in df.columns:
-                        latest_date = df['报告日期'].max()
-                        summary_df = df[df['报告日期'] == latest_date]
+                        df['报告日期'] = pd.to_datetime(df['报告日期'], errors='coerce')
+                        df = df.sort_values(by='报告日期', ascending=False)
+                        latest_date = df['报告日期'].dropna().max()
+                        if pd.notna(latest_date):
+                            summary_df = df[df['报告日期'] == latest_date]
+                        else:
+                            summary_df = df.head(1)
                     elif summary_type == 'full_table':
-                        summary_df = df
+                        summary_df = sort_dataframe_by_date(df)
                     elif summary_type == 'latest_row':
-                        summary_df = df.head(1)
+                        summary_df = sort_dataframe_by_date(df).head(1)
                     elif summary_type == 'last_month' and '日期' in df.columns:
                         try:
-                            df['日期'] = pd.to_datetime(df['日期'])
+                            df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+                            df = df.sort_values(by='日期', ascending=False)
                             one_month_ago = datetime.now() - pd.DateOffset(months=1)
                             summary_df = df[df['日期'] >= one_month_ago]
-                            # 如果最近一个月没有数据，则显示最新的5条作为备选
                             if summary_df.empty:
                                 f.write("最近一个月内无相关研报，以下为最新的5条记录：\n")
                                 summary_df = df.head(5)
                         except Exception:
-                            summary_df = df.head(5) # Fallback to show latest 5
-                    
+                            summary_df = sort_dataframe_by_date(df).head(5)
+
                     if summary_df is not None and not summary_df.empty:
                         f.write(summary_df.to_string(index=False))
                     else:
                         f.write("无可用数据。")
-                        
+
                     f.write("\n\n")
         
         print(f"--- 摘要数据已成功保存至 TXT 文件: {file_path} ---")
@@ -290,4 +311,3 @@ if __name__ == '__main__':
         else:
             print("未能获取到数据或数据为空。")
     print("\n========================================================================")
-

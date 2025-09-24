@@ -6,3 +6,5 @@ fundamental_data*
 macro_data*
 market_sentiment*
 risk_event*
+__pycache__/
+*.pyc
