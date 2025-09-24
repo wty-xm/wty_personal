@@ -15,7 +15,7 @@ INDEX_CODES = [
 # --- 数据获取开关 ---
 # True 表示获取, False 表示跳过
 GET_MINUTE_DATA = False  # 是否获取分钟K线 (已改为默认开启以演示新功能)
-GET_DAILY_DATA = False   # 是否获取日线K线
+GET_DAILY_DATA = True   # 是否获取日线K线
 
 # 分钟K线周期: 可选 '1', '5', '15', '30', '60'
 MINUTE_PERIOD = '1'
