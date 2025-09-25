@@ -1,4 +1,4 @@
 import akshare as ak
 
-stock_szse_summary_df = ak.stock_margin_detail_sse(date="20250921")
-print(stock_szse_summary_df)
+stock_hk_financial_indicator_em_df = ak.stock_hk_financial_indicator_em(symbol="03900")
+print(stock_hk_financial_indicator_em_df)

@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 import os
+import re
 
 # --- 1. 配置区 (Configuration Area) ---
 # 请在这里输入你需要获取数据的股票代码列表
@@ -38,6 +39,51 @@ GET_DAILY_DATA = True   # 是否获取日线K线
 # 分钟K线周期: 可选 '1', '5', '15', '30', '60'
 MINUTE_PERIOD = '1'
 
+# --- 实用工具函数 ---
+def sanitize_filename_component(value: str) -> str:
+    """将值转换为适合文件名的安全片段。"""
+    if not value:
+        return ''
+    value = str(value).strip()
+    value = re.sub(r"[\\/:*?\"<>|]", "_", value)
+    value = re.sub(r"\s+", "_", value)
+    return value.strip('_')
+
+
+def fetch_stock_name_from_info(code_without_prefix: str) -> str:
+    """优先从个股信息接口获取股票简称，失败则返回空字符串。"""
+    try:
+        info_df = ak.stock_individual_info_em(symbol=code_without_prefix)
+        if info_df is not None and not info_df.empty:
+            candidates = info_df[info_df['item'].isin(['证券简称', '股票简称', '公司简称', '公司名称', '股票名称'])]
+            if not candidates.empty:
+                return str(candidates['value'].iloc[0]).strip()
+    except Exception:
+        pass
+    return ''
+
+
+def get_stock_name(full_code: str, cache: dict, snapshot_lookup: dict) -> str:
+    """获取股票名称并缓存，同时优先利用已有快照信息。"""
+    if full_code in cache:
+        return cache[full_code]
+
+    code_without_prefix = full_code[2:]
+
+    if snapshot_lookup and code_without_prefix in snapshot_lookup:
+        name = str(snapshot_lookup[code_without_prefix]).strip()
+        if name:
+            cache[full_code] = name
+            return name
+
+    name = fetch_stock_name_from_info(code_without_prefix)
+    if not name:
+        name = code_without_prefix
+
+    cache[full_code] = name
+    return name
+
+
 # --- 2. 主功能函数 ---
 def get_and_save_stock_data():
     """
@@ -58,6 +104,9 @@ def get_and_save_stock_data():
     os.makedirs(timestamp_folder, exist_ok=True)
     print(f"所有报告将保存在文件夹: {timestamp_folder}/")
 
+    code_name_cache = {}
+    snapshot_lookup = {}
+
     try:
         # --- A. 获取所有代码的实时快照 (合并) ---
         print("\n--- 正在获取盘面快照 (所有代码) ---")
@@ -65,6 +114,12 @@ def get_and_save_stock_data():
             snapshot_df_raw = ak.stock_zh_a_spot_em()
             codes_for_filter = [code[2:] for code in STOCK_CODES]
             snapshot_df = snapshot_df_raw[snapshot_df_raw['代码'].isin(codes_for_filter)].copy()
+            if snapshot_df_raw is not None and not snapshot_df_raw.empty and '代码' in snapshot_df_raw.columns and '名称' in snapshot_df_raw.columns:
+                snapshot_lookup = snapshot_df_raw.set_index('代码')['名称'].dropna().astype(str).to_dict()
+                for code in STOCK_CODES:
+                    code_without_prefix = code[2:]
+                    if code_without_prefix in snapshot_lookup and snapshot_lookup[code_without_prefix]:
+                        code_name_cache[code] = snapshot_lookup[code_without_prefix].strip()
             if not snapshot_df.empty:
                 # V5.0 更新: 增加更多快照字段
                 core_columns = [
@@ -95,8 +150,12 @@ def get_and_save_stock_data():
         start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
 
         for code in STOCK_CODES:
-            print(f"\n--- 正在处理股票: {code} ---")
-            
+            stock_name = get_stock_name(code, code_name_cache, snapshot_lookup)
+            name_token = sanitize_filename_component(stock_name)
+            name_suffix = f"_{name_token}" if name_token else ""
+
+            print(f"\n--- 正在处理股票: {code} ({stock_name}) ---")
+
             code_for_ak = code[2:]
 
             # --- 获取分钟K线 (根据开关) ---
@@ -129,7 +188,7 @@ def get_and_save_stock_data():
                         
                         if not filtered_df.empty:
                             print(f"已筛选出从 {market_open_time.strftime('%Y-%m-%d %H:%M:%S')} 到当前时间的 {len(filtered_df)} 条分钟数据。")
-                            minute_path = os.path.join(timestamp_folder, f"minute_data_today_{code}.csv")
+                            minute_path = os.path.join(timestamp_folder, f"minute_data_today_{code}{name_suffix}.csv")
                             filtered_df.to_csv(minute_path, index=False, encoding='utf-8-sig')
                             print(f"[分钟数据] 已保存为: {minute_path}")
                         else:
@@ -155,8 +214,9 @@ def get_and_save_stock_data():
                     daily_df = ak.stock_zh_a_hist(symbol=code_for_ak, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                     if not daily_df.empty:
                         daily_df['代码'] = code_for_ak
+                        daily_df['名称'] = stock_name
                         print(f"成功获取 {code} 的日线数据。")
-                        daily_path = os.path.join(timestamp_folder, f"daily_data_{code}.csv")
+                        daily_path = os.path.join(timestamp_folder, f"daily_data_{code}{name_suffix}.csv")
                         daily_df.to_csv(daily_path, index=False, encoding='utf-8-sig')
                         print(f"[日线数据] 已保存为: {daily_path}")
                     else:
