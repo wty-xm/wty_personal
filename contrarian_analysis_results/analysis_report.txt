@@ -1,0 +1,58 @@
+CONTRARIAN STRATEGY ANALYSIS REPORT
+========================================
+Generated at: 2025-10-28 11:48:52 UTC
+
+Performance Overview
+--------------------
+Total Return: 3.9394
+Annualized Return: 0.0587
+Annualized Volatility: 0.2232
+Sharpe (approx): 1.1513
+Max Drawdown (recalc): -0.1144
+
+Trade Diagnostics
+-----------------
+Trades: 152
+Win Rate: 68.42%
+Average Win: 0.0235
+Average Loss: -0.0142
+Profit Factor: 3.5823
+Max Consecutive Wins: 16
+Max Consecutive Losses: 9
+Average Holding Days: 4.74
+
+Top Asset Contributors (PnL)
+-----------------------------
+恒生指数: 0.2561
+中信风格指数:成长: 0.1691
+申万小盘指数: 0.1439
+申万中盘指数: 0.1412
+中信风格指数:周期: 0.1258
+期货收盘价(连续):CBOT小麦: 0.1158
+恒生地产分类指数: 0.1044
+ICE布油: 0.1028
+伦敦金现: 0.0768
+恒生医疗保健指数: 0.0761
+
+PnL by Calendar Year
+--------------------
+1997: 0.0003
+2003: 0.0845
+2005: 0.0532
+2007: 0.0933
+2008: 0.0546
+2009: 0.5371
+2010: -0.0004
+2011: 0.0167
+2012: 0.0737
+2013: 0.0181
+2014: -0.0041
+2015: 0.1008
+2016: 0.0675
+2017: 0.0076
+2018: -0.0561
+2019: 0.3317
+2022: 0.2238
+2023: 0.0338
+2024: 0.1521
+2025: -0.0242
