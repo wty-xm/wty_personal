@@ -1,20 +1,20 @@
 metric,value
-Total Return,3.9394469975800983
-Annualized Return,0.0587032007136558
-Annualized Volatility,0.2231746286529723
-Sharpe (approx),1.1512693191607406
-Max Drawdown,-0.1143657199002755
-Win Rate,0.6842105263157895
-Trades,152.0
-Mean Trade PnL,0.011604565415343127
-Median Trade PnL,0.00764738814139905
-Average Holding Days,4.743421052631579
-Max Holding Days,7.0
-Min Holding Days,0.0
-Max Drawdown (recalc),-0.11436571990027555
-Current Drawdown,-0.030971899048234497
-Days Below -5pct DD,17.0
-Profit Factor,3.582251357900772
-Pnl StdDev,0.027978558568465307
-Pnl Skewness,1.0520875150531277
-Pnl Kurtosis,4.089620743288505
+Total Return,9.882632025912628
+Annualized Return,0.0905193608851495
+Annualized Volatility,0.3330776136365425
+Sharpe (approx),1.120083858983394
+Max Drawdown,-0.2750393234436679
+Win Rate,0.7350993377483444
+Trades,151.0
+Mean Trade PnL,0.01818268754533942
+Median Trade PnL,0.0089334451135462
+Average Holding Days,60.00662251655629
+Max Holding Days,186.0
+Min Holding Days,14.0
+Max Drawdown (recalc),-0.2750393234436679
+Current Drawdown,-0.0023493480272896994
+Days Below -5pct DD,18.0
+Profit Factor,4.856492492549748
+Pnl StdDev,0.04318680859529025
+Pnl Skewness,2.3282288026208064
+Pnl Kurtosis,8.76126464718063

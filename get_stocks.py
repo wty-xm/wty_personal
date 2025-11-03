@@ -43,6 +43,10 @@ GET_DAILY_DATA = True   # 是否获取日线K线
 # 分钟K线周期: 可选 '1', '5', '15', '30', '60'
 MINUTE_PERIOD = '1'
 
+# --- 快照获取策略 ---
+SNAPSHOT_MAX_ATTEMPTS = 3        # 每个接口的最大重试次数
+SNAPSHOT_RETRY_DELAY_SECONDS = 3 # 接口调用失败后的等待时间(秒)
+
 # --- 实用工具函数 ---
 def sanitize_filename_component(value: str) -> str:
     """将值转换为适合文件名的安全片段。"""
@@ -115,37 +119,96 @@ def get_and_save_stock_data():
         # --- A. 获取所有代码的实时快照 (合并) ---
         print("\n--- 正在获取盘面快照 (所有代码) ---")
         try:
-            snapshot_df_raw = ak.stock_zh_a_spot_em()
-            codes_for_filter = [code[2:] for code in STOCK_CODES]
-            snapshot_df = snapshot_df_raw[snapshot_df_raw['代码'].isin(codes_for_filter)].copy()
-            if snapshot_df_raw is not None and not snapshot_df_raw.empty and '代码' in snapshot_df_raw.columns and '名称' in snapshot_df_raw.columns:
-                snapshot_lookup = snapshot_df_raw.set_index('代码')['名称'].dropna().astype(str).to_dict()
-                for code in STOCK_CODES:
-                    code_without_prefix = code[2:]
-                    if code_without_prefix in snapshot_lookup and snapshot_lookup[code_without_prefix]:
-                        code_name_cache[code] = snapshot_lookup[code_without_prefix].strip()
-            if not snapshot_df.empty:
-                # V5.0 更新: 增加更多快照字段
-                core_columns = [
-                    '代码', '名称', '最新价', '涨跌额', '涨跌幅', '成交量', '成交额',
-                    '振幅', '最高', '最低', '今开', '昨收', '量比', '换手率',
-                    '市盈率-动态', '市净率', '总市值', '流通市值', '涨速',
-                    '5分钟涨跌', '60日涨跌幅', '年初至今涨跌幅'
-                ]
-                # 筛选出实际存在的列，避免因接口变动导致列名不存在而报错
-                existing_columns = [col for col in core_columns if col in snapshot_df.columns]
-                snapshot_df = snapshot_df[existing_columns]
-                print(f"成功获取 {len(snapshot_df)} 只股票的盘面快照。")
+            snapshot_df_raw = pd.DataFrame()
+            snapshot_source_used = None
+            last_snapshot_error = None
 
-                # 保存快照文件
-                snapshot_path = os.path.join(timestamp_folder, "snapshot_report_all.txt")
-                with open(snapshot_path, 'w', encoding='utf-8') as f:
-                    f.write(f"--- 股票盘面实时快照 ---\n")
-                    f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    f.write(snapshot_df.to_string(index=False))
-                print(f"[快照报告] 已保存为: {snapshot_path}")
+            snapshot_sources = [
+                ("东方财富", ak.stock_zh_a_spot_em),
+                ("新浪", ak.stock_zh_a_spot),
+            ]
+
+            for idx, (source_name, fetcher) in enumerate(snapshot_sources):
+                if idx > 0:
+                    print(f"{snapshot_sources[idx-1][0]}接口未成功，尝试使用备用的{source_name}接口...")
+
+                success = False
+                for attempt in range(1, SNAPSHOT_MAX_ATTEMPTS + 1):
+                    try:
+                        candidate_df = fetcher()
+                        if candidate_df is not None and not candidate_df.empty:
+                            snapshot_df_raw = candidate_df
+                            snapshot_source_used = source_name
+                            success = True
+                            print(f"{source_name}接口获取盘面快照成功（第 {attempt} 次尝试）。")
+                            break
+                        else:
+                            last_snapshot_error = ValueError("接口返回空数据")
+                            print(f"{source_name}接口第 {attempt} 次尝试返回空数据。")
+                    except Exception as e:
+                        last_snapshot_error = e
+                        print(f"{source_name}接口第 {attempt} 次尝试失败: {e}")
+
+                    if attempt < SNAPSHOT_MAX_ATTEMPTS:
+                        time.sleep(SNAPSHOT_RETRY_DELAY_SECONDS)
+
+                if success:
+                    break
+
+            if snapshot_df_raw is None or snapshot_df_raw.empty:
+                if last_snapshot_error:
+                    print(f"获取盘面快照失败，最后的错误信息: {last_snapshot_error}")
+                else:
+                    print("获取盘面快照失败：未能从可用接口获取数据。")
+                snapshot_df = pd.DataFrame()
             else:
-                print("未能获取到任何指定股票的盘面快照。")
+                codes_without_prefix = {code[2:] for code in STOCK_CODES}
+                codes_full_lower = {code.lower() for code in STOCK_CODES}
+
+                if '代码' not in snapshot_df_raw.columns:
+                    print("快照数据缺少'代码'列，无法筛选指定股票。")
+                    snapshot_df = pd.DataFrame()
+                else:
+                    snapshot_working_df = snapshot_df_raw.copy()
+                    snapshot_working_df['_代码lower'] = snapshot_working_df['代码'].astype(str).str.lower()
+                    snapshot_working_df['_代码无前缀'] = snapshot_working_df['代码'].astype(str).str[-6:]
+
+                    filter_mask = snapshot_working_df['_代码无前缀'].isin(codes_without_prefix) | snapshot_working_df['_代码lower'].isin(codes_full_lower)
+                    snapshot_df = snapshot_working_df[filter_mask].copy()
+                    snapshot_df.drop(columns=['_代码lower', '_代码无前缀'], inplace=True, errors='ignore')
+
+                    if '名称' in snapshot_df_raw.columns:
+                        lookup_df = snapshot_df_raw.dropna(subset=['名称']).copy()
+                        lookup_df['_代码无前缀'] = lookup_df['代码'].astype(str).str[-6:]
+                        snapshot_lookup = lookup_df.set_index('_代码无前缀')['名称'].astype(str).to_dict()
+                        for code in STOCK_CODES:
+                            code_without_prefix = code[2:]
+                            name_candidate = snapshot_lookup.get(code_without_prefix)
+                            if name_candidate:
+                                code_name_cache[code] = name_candidate.strip()
+
+                    if not snapshot_df.empty:
+                        # V5.0 更新: 增加更多快照字段
+                        core_columns = [
+                            '代码', '名称', '最新价', '涨跌额', '涨跌幅', '成交量', '成交额',
+                            '振幅', '最高', '最低', '今开', '昨收', '量比', '换手率',
+                            '市盈率-动态', '市净率', '总市值', '流通市值', '涨速',
+                            '5分钟涨跌', '60日涨跌幅', '年初至今涨跌幅'
+                        ]
+                        # 筛选出实际存在的列，避免因接口变动导致列名不存在而报错
+                        existing_columns = [col for col in core_columns if col in snapshot_df.columns]
+                        snapshot_df = snapshot_df[existing_columns]
+                        print(f"成功获取 {len(snapshot_df)} 只股票的盘面快照，数据来源：{snapshot_source_used}。")
+
+                        # 保存快照文件
+                        snapshot_path = os.path.join(timestamp_folder, "snapshot_report_all.txt")
+                        with open(snapshot_path, 'w', encoding='utf-8') as f:
+                            f.write(f"--- 股票盘面实时快照 ---\n")
+                            f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                            f.write(snapshot_df.to_string(index=False))
+                        print(f"[快照报告] 已保存为: {snapshot_path}")
+                    else:
+                        print("未能获取到任何指定股票的盘面快照。")
         except Exception as e:
             print(f"获取盘面快照时发生错误: {e}")
 
