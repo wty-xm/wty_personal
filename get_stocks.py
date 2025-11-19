@@ -46,6 +46,8 @@ MINUTE_PERIOD = '1'
 # --- 快照获取策略 ---
 SNAPSHOT_MAX_ATTEMPTS = 3        # 每个接口的最大重试次数
 SNAPSHOT_RETRY_DELAY_SECONDS = 3 # 接口调用失败后的等待时间(秒)
+DATA_MAX_ATTEMPTS = 3            # 分钟/日线接口的最大重试次数
+DATA_RETRY_DELAY_SECONDS = 2     # 分钟/日线接口的重试间隔
 
 # --- 实用工具函数 ---
 def sanitize_filename_component(value: str) -> str:
@@ -92,6 +94,40 @@ def get_stock_name(full_code: str, cache: dict, snapshot_lookup: dict) -> str:
     return name
 
 
+def fetch_with_retry(fetcher, label, max_attempts=DATA_MAX_ATTEMPTS, delay=DATA_RETRY_DELAY_SECONDS):
+    """通用重试逻辑，返回DataFrame或空表，不抛异常。"""
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            df = fetcher()
+            if df is not None and not df.empty:
+                if attempt > 1:
+                    print(f"{label} 第 {attempt} 次尝试成功。")
+                return df
+            last_error = ValueError("接口返回空数据")
+            print(f"{label} 第 {attempt} 次返回空数据。")
+        except Exception as e:
+            last_error = e
+            print(f"{label} 第 {attempt} 次尝试失败: {e}")
+
+        if attempt < max_attempts:
+            time.sleep(delay)
+
+    if last_error:
+        print(f"{label} 多次尝试仍失败，最后错误: {last_error}")
+    else:
+        print(f"{label} 多次尝试仍失败，接口一直返回空数据。")
+    return pd.DataFrame()
+
+
+def make_fetcher_if_exists(attr_name, *args, **kwargs):
+    """存在则返回可调用fetcher，不存在返回None。"""
+    func = getattr(ak, attr_name, None)
+    if func is None:
+        return None
+    return lambda: func(*args, **kwargs)
+
+
 # --- 2. 主功能函数 ---
 def get_and_save_stock_data():
     """
@@ -123,37 +159,32 @@ def get_and_save_stock_data():
             snapshot_source_used = None
             last_snapshot_error = None
 
-            snapshot_sources = [
-                ("东方财富", ak.stock_zh_a_spot_em),
-                ("新浪", ak.stock_zh_a_spot),
-            ]
+            snapshot_sources = []
+            fetcher_em = make_fetcher_if_exists("stock_zh_a_spot_em")
+            if fetcher_em:
+                snapshot_sources.append(("东方财富", fetcher_em))
+            fetcher_sina = make_fetcher_if_exists("stock_zh_a_spot")
+            if fetcher_sina:
+                snapshot_sources.append(("新浪", fetcher_sina))
+
+            if not snapshot_sources:
+                raise RuntimeError("当前 akshare 版本缺少可用的 A股快照接口（stock_zh_a_spot_em / stock_zh_a_spot）。")
 
             for idx, (source_name, fetcher) in enumerate(snapshot_sources):
                 if idx > 0:
                     print(f"{snapshot_sources[idx-1][0]}接口未成功，尝试使用备用的{source_name}接口...")
 
-                success = False
-                for attempt in range(1, SNAPSHOT_MAX_ATTEMPTS + 1):
-                    try:
-                        candidate_df = fetcher()
-                        if candidate_df is not None and not candidate_df.empty:
-                            snapshot_df_raw = candidate_df
-                            snapshot_source_used = source_name
-                            success = True
-                            print(f"{source_name}接口获取盘面快照成功（第 {attempt} 次尝试）。")
-                            break
-                        else:
-                            last_snapshot_error = ValueError("接口返回空数据")
-                            print(f"{source_name}接口第 {attempt} 次尝试返回空数据。")
-                    except Exception as e:
-                        last_snapshot_error = e
-                        print(f"{source_name}接口第 {attempt} 次尝试失败: {e}")
+                snapshot_df_raw = fetch_with_retry(
+                    fetcher,
+                    f"{source_name} 股票快照",
+                    max_attempts=SNAPSHOT_MAX_ATTEMPTS,
+                    delay=SNAPSHOT_RETRY_DELAY_SECONDS,
+                )
 
-                    if attempt < SNAPSHOT_MAX_ATTEMPTS:
-                        time.sleep(SNAPSHOT_RETRY_DELAY_SECONDS)
-
-                if success:
+                if snapshot_df_raw is not None and not snapshot_df_raw.empty:
+                    snapshot_source_used = source_name
                     break
+                last_snapshot_error = f"{source_name} 接口在多次重试后仍失败"
 
             if snapshot_df_raw is None or snapshot_df_raw.empty:
                 if last_snapshot_error:
@@ -227,17 +258,37 @@ def get_and_save_stock_data():
 
             # --- 获取分钟K线 (根据开关) ---
             if GET_MINUTE_DATA:
-                minute_df = pd.DataFrame()
-                for i in range(3): # 最多重试3次
-                    try:
-                        # akshare默认获取最近一个交易日的完整分钟数据
-                        minute_df = ak.stock_zh_a_hist_min_em(symbol=code_for_ak, period=MINUTE_PERIOD)
+                minute_fetchers = []
+                fetcher_hist_min = make_fetcher_if_exists(
+                    "stock_zh_a_hist_min_em", symbol=code_for_ak, period=MINUTE_PERIOD
+                )
+                if fetcher_hist_min:
+                    minute_fetchers.append(("东财 hist_min", fetcher_hist_min))
+
+                fetcher_minute = make_fetcher_if_exists(
+                    "stock_zh_a_minute", symbol=code, period=MINUTE_PERIOD
+                )
+                if fetcher_minute:
+                    minute_fetchers.append(("新浪 minute", fetcher_minute))
+
+                if not minute_fetchers:
+                    print(f"当前 akshare 版本缺少分钟K线接口，跳过 {code}。")
+                    minute_df = pd.DataFrame()
+                    last_minute_error = "无可用接口"
+                else:
+                    minute_df = pd.DataFrame()
+                    last_minute_error = None
+                    for idx, (source_name, fetcher) in enumerate(minute_fetchers):
+                        minute_df = fetch_with_retry(
+                            fetcher,
+                            f"{code} 分钟K线（{source_name}）",
+                            max_attempts=DATA_MAX_ATTEMPTS,
+                            delay=DATA_RETRY_DELAY_SECONDS,
+                        )
                         if not minute_df.empty:
-                            print(f"成功获取 {code} 的分钟K线原始数据。")
+                            print(f"成功获取 {code} 的分钟K线原始数据（{source_name}）。")
                             break
-                    except Exception as e:
-                        print(f"第 {i+1} 次尝试获取 {code} 分钟K线失败: {e}")
-                    if i < 2: time.sleep(2)
+                        last_minute_error = f"{source_name} 重试后仍失败"
                 
                 if not minute_df.empty:
                     # --- V6.0 核心优化：筛选从今天开盘到当前时间的数据 ---
@@ -273,23 +324,68 @@ def get_and_save_stock_data():
                         # print(f"[原始分钟数据] 筛选失败，已将原始数据保存为: {minute_path}")
 
                 else:
-                    print(f"最终未能获取到 {code} 的分钟K线数据。")
+                    if last_minute_error:
+                        print(f"最终未能获取到 {code} 的分钟K线数据，最后错误: {last_minute_error}")
+                    else:
+                        print(f"最终未能获取到 {code} 的分钟K线数据。")
 
             # --- 获取日线K线 (根据开关) ---
             if GET_DAILY_DATA:
-                try:
-                    daily_df = ak.stock_zh_a_hist(symbol=code_for_ak, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
-                    if not daily_df.empty:
-                        daily_df['代码'] = code_for_ak
-                        daily_df['名称'] = stock_name
-                        print(f"成功获取 {code} 的日线数据。")
-                        daily_path = os.path.join(timestamp_folder, f"daily_data_{code}{name_suffix}.csv")
-                        daily_df.to_csv(daily_path, index=False, encoding='utf-8-sig')
-                        print(f"[日线数据] 已保存为: {daily_path}")
+                daily_fetchers = []
+                fetcher_hist = make_fetcher_if_exists(
+                    "stock_zh_a_hist",
+                    symbol=code_for_ak,
+                    period="daily",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust="qfq",
+                )
+                if fetcher_hist:
+                    daily_fetchers.append(("东财 stock_zh_a_hist", fetcher_hist))
+
+                fetcher_daily = make_fetcher_if_exists(
+                    "stock_zh_a_daily", symbol=code
+                )
+                if fetcher_daily:
+                    daily_fetchers.append(("新浪 stock_zh_a_daily", fetcher_daily))
+
+                fetcher_daily_qfq = make_fetcher_if_exists(
+                    "stock_zh_a_daily_qfq", symbol=code
+                )
+                if fetcher_daily_qfq:
+                    daily_fetchers.append(("新浪 stock_zh_a_daily_qfq", fetcher_daily_qfq))
+
+                if not daily_fetchers:
+                    print(f"当前 akshare 版本缺少日线接口，跳过 {code}。")
+                    daily_df = pd.DataFrame()
+                    last_daily_error = "无可用接口"
+                else:
+                    daily_df = pd.DataFrame()
+                    last_daily_error = None
+                    for idx, (source_name, fetcher) in enumerate(daily_fetchers):
+                        daily_df = fetch_with_retry(
+                            fetcher,
+                            f"{code} 日线数据（{source_name}）",
+                            max_attempts=DATA_MAX_ATTEMPTS,
+                            delay=DATA_RETRY_DELAY_SECONDS,
+                        )
+                        if not daily_df.empty:
+                            print(f"{code} 日线数据来自 {source_name}。")
+                            break
+                        last_daily_error = f"{source_name} 重试后仍失败"
+
+                if not daily_df.empty:
+                    daily_df['代码'] = code_for_ak
+                    daily_df['名称'] = stock_name
+                    print(f"成功获取 {code} 的日线数据。")
+                    daily_path = os.path.join(timestamp_folder, f"daily_data_{code}{name_suffix}.csv")
+                    daily_df.to_csv(daily_path, index=False, encoding='utf-8-sig')
+                    print(f"[日线数据] 已保存为: {daily_path}")
+                else:
+                    if last_daily_error:
+                        print(f"获取到 {code} 的日线数据为空，最后错误: {last_daily_error}")
                     else:
                         print(f"获取到 {code} 的日线数据为空。")
-                except Exception as e:
-                    print(f"获取 {code} 日线数据失败: {e}")
 
         print("\n--- 所有任务执行完毕 ---")
 
