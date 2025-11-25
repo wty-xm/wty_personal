@@ -9,7 +9,6 @@ import re
 # 请在这里输入你需要获取数据的股票代码列表
 STOCK_CODES = [
     'sh603019',   # 中科曙光
-    'sz000032',   # 深桑达A
     'sh603279',   # 景津装备
     'sh600395',   # 盘江股份
     'sh601918',   # 新集能源
@@ -25,11 +24,14 @@ STOCK_CODES = [
     'sz000977',     # 浪潮信息
     'sz300274',     # 阳光电源
     'sh600777',     # 新潮能源
+    'sh688041',     # 海光信息
+
 
     # 已清仓股票
     # 'sh603398',     # st沐邦 
     # 'sz002807',     # 江阴银行
     # 'sh601689',     # 拓普集团
+    # 'sz000032',   # 深桑达A
 ]
 
 # --- 数据获取开关 ---
@@ -42,12 +44,15 @@ GET_DAILY_DATA = True   # 是否获取日线K线
 
 # 分钟K线周期: 可选 '1', '5', '15', '30', '60'
 MINUTE_PERIOD = '1'
+DAILY_LOOKBACK_DAYS = 365  # 日线数据回溯天数，可按需调整
 
 # --- 快照获取策略 ---
 SNAPSHOT_MAX_ATTEMPTS = 3        # 每个接口的最大重试次数
 SNAPSHOT_RETRY_DELAY_SECONDS = 3 # 接口调用失败后的等待时间(秒)
 DATA_MAX_ATTEMPTS = 3            # 分钟/日线接口的最大重试次数
 DATA_RETRY_DELAY_SECONDS = 2     # 分钟/日线接口的重试间隔
+MINUTE_TIME_COLUMNS = ['时间', '日期时间', '时间戳', 'datetime', 'Datetime', 'date', '日期']
+DAILY_DATE_COLUMNS = ['日期', 'date', 'Date', '时间', 'datetime', '日期时间']
 
 # --- 实用工具函数 ---
 def sanitize_filename_component(value: str) -> str:
@@ -126,6 +131,33 @@ def make_fetcher_if_exists(attr_name, *args, **kwargs):
     if func is None:
         return None
     return lambda: func(*args, **kwargs)
+
+
+def detect_time_column(df, candidates):
+    """返回第一个存在的时间列名，不存在则返回None。"""
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def filter_recent_days(df, days, date_candidates):
+    """按提供的天数过滤最近数据，适配不同接口的日期列名。"""
+    if df.empty or days <= 0:
+        return df
+
+    date_col = detect_time_column(df, date_candidates)
+    if not date_col:
+        return df
+
+    try:
+        df[date_col] = pd.to_datetime(df[date_col])
+    except Exception:
+        return df
+
+    cutoff = datetime.now() - timedelta(days=days)
+    filtered_df = df[df[date_col] >= cutoff].copy()
+    return filtered_df if not filtered_df.empty else df
 
 
 # --- 2. 主功能函数 ---
@@ -245,7 +277,7 @@ def get_and_save_stock_data():
 
         # --- B & C. 循环获取每只股票的分钟和日线数据 (独立保存) ---
         end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=DAILY_LOOKBACK_DAYS)).strftime("%Y%m%d")
 
         for code in STOCK_CODES:
             stock_name = get_stock_name(code, code_name_cache, snapshot_lookup)
@@ -291,37 +323,35 @@ def get_and_save_stock_data():
                         last_minute_error = f"{source_name} 重试后仍失败"
                 
                 if not minute_df.empty:
-                    # --- V6.0 核心优化：筛选从今天开盘到当前时间的数据 ---
+                    filtered_df = pd.DataFrame()
                     try:
-                        # 1. 将'时间'列转换为datetime对象，以便于比较
-                        minute_df['时间'] = pd.to_datetime(minute_df['时间'])
-                        
-                        # 2. 定义今天的开盘时间和当前时间
-                        now = datetime.now()
-                        market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
-                        
-                        # 3. 执行筛选
-                        #    筛选条件：时间戳必须大于等于今天的开盘时间，并小于等于当前时间
-                        filtered_df = minute_df[(minute_df['时间'] >= market_open_time) & (minute_df['时间'] <= now)].copy()
-                        
-                        if not filtered_df.empty:
-                            print(f"已筛选出从 {market_open_time.strftime('%Y-%m-%d %H:%M:%S')} 到当前时间的 {len(filtered_df)} 条分钟数据。")
-                            minute_path = os.path.join(timestamp_folder, f"minute_data_today_{code}{name_suffix}.csv")
-                            filtered_df.to_csv(minute_path, index=False, encoding='utf-8-sig')
-                            print(f"[分钟数据] 已保存为: {minute_path}")
+                        time_col = detect_time_column(minute_df, MINUTE_TIME_COLUMNS)
+                        if not time_col:
+                            print(f"{code} 分钟数据缺少可识别的时间列，跳过保存。")
                         else:
-                            # 如果筛选后为空，说明当前时间可能在开盘前
-                            if now < market_open_time:
-                                print(f"当前时间 {now.strftime('%H:%M:%S')} 早于开盘时间 09:30，不生成分钟数据文件。")
-                            else:
-                                print(f"在 {market_open_time.strftime('%H:%M:%S')} 到 {now.strftime('%H:%M:%S')} 之间未找到数据，可能为非交易日或刚开盘。")
+                            if time_col != '时间':
+                                minute_df.rename(columns={time_col: '时间'}, inplace=True)
 
+                            minute_df['时间'] = pd.to_datetime(minute_df['时间'])
+
+                            now = datetime.now()
+                            today = now.date()
+                            filtered_df = minute_df[minute_df['时间'].dt.date == today].copy()
+
+                            if filtered_df.empty:
+                                latest_date = minute_df['时间'].dt.date.max()
+                                if latest_date and latest_date != today:
+                                    print(f"{code} 分钟数据为历史数据，未生成当日文件。")
+                                else:
+                                    print(f"在今日交易时间内未找到 {code} 的分钟数据。")
                     except Exception as e:
                         print(f"处理和筛选分钟数据时出错: {e}")
-                        # 如果筛选失败，可以选择保存原始数据作为备用
-                        # minute_path = os.path.join(timestamp_folder, f"minute_data_raw_{code}.csv")
-                        # minute_df.to_csv(minute_path, index=False, encoding='utf-8-sig')
-                        # print(f"[原始分钟数据] 筛选失败，已将原始数据保存为: {minute_path}")
+                        filtered_df = pd.DataFrame()
+
+                    if not filtered_df.empty:
+                        minute_path = os.path.join(timestamp_folder, f"minute_data_today_{code}{name_suffix}.csv")
+                        filtered_df.to_csv(minute_path, index=False, encoding='utf-8-sig')
+                        print(f"[分钟数据] 已保存 {len(filtered_df)} 条当日记录: {minute_path}")
 
                 else:
                     if last_minute_error:
@@ -375,6 +405,10 @@ def get_and_save_stock_data():
                         last_daily_error = f"{source_name} 重试后仍失败"
 
                 if not daily_df.empty:
+                    original_len = len(daily_df)
+                    daily_df = filter_recent_days(daily_df, DAILY_LOOKBACK_DAYS, DAILY_DATE_COLUMNS)
+                    if len(daily_df) != original_len:
+                        print(f"{code} 日线数据已裁剪为最近 {DAILY_LOOKBACK_DAYS} 天，共 {len(daily_df)} 条。")
                     daily_df['代码'] = code_for_ak
                     daily_df['名称'] = stock_name
                     print(f"成功获取 {code} 的日线数据。")
