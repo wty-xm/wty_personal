@@ -98,6 +98,10 @@ def get_and_save_index_data():
             fetcher_sina = make_fetcher_if_exists("stock_zh_index_spot")
             if fetcher_sina:
                 snapshot_sources.append(("新浪", fetcher_sina))
+            # 另一种新浪命名兼容
+            fetcher_sina_alt = make_fetcher_if_exists("stock_zh_index_spot_sina")
+            if fetcher_sina_alt:
+                snapshot_sources.append(("新浪(备用命名)", fetcher_sina_alt))
             # 备用：无symbol版本
             fetcher_em_no_param = make_fetcher_if_exists("stock_zh_index_spot_em")
             if fetcher_em_no_param and fetcher_em_no_param is not fetcher_em:
