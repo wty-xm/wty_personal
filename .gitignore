@@ -8,3 +8,12 @@ market_sentiment*
 risk_event*
 __pycache__/
 *.pyc
+
+# Generated financing/margin data
+stock_margin_detail_cache/
+stock_margin_detail_report*/
+margin_report*/
+margin_account_report*/
+/融资买入额.xlsx
+/融资余额.xlsx
+/run_summary.xlsx
