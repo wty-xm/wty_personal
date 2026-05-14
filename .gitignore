@@ -14,6 +14,8 @@ stock_margin_detail_cache/
 stock_margin_detail_report*/
 margin_report*/
 margin_account_report*/
+stock_daily_metrics_cache/
+stock_daily_metrics_report*/
 /融资买入额.xlsx
 /融资余额.xlsx
 /run_summary.xlsx
