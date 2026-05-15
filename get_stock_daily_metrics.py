@@ -29,6 +29,7 @@ PRICE_METRICS = {
     "最低价": "最低",
 }
 VALUE_METRICS = {
+    "总市值": "总市值",
     # 东方财富历史估值接口字段名为“流通市值”；这里按用户需求输出为“流动市值”。
     "流动市值": "流通市值",
     # 东方财富实时快照有“市盈率-动态”，历史估值接口可用字段为 PE(TTM)。
@@ -107,12 +108,31 @@ def parse_args():
     )
     parser.add_argument("--force-refresh", action="store_true", help="忽略已有缓存重新请求")
     parser.add_argument(
+        "--metrics",
+        default="",
+        help="逗号分隔的输出指标；为空表示全部。例如: 总市值 或 成交额,总市值",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
         help="仅处理清单前 N 只股票；0 表示处理全部，用于小范围验证",
     )
     return parser.parse_args()
+
+
+def parse_selected_metrics(metrics_text):
+    if not metrics_text:
+        return list(METRIC_CONFIG)
+
+    metrics = [item.strip() for item in metrics_text.split(",") if item.strip()]
+    unknown_metrics = [metric for metric in metrics if metric not in METRIC_CONFIG]
+    if unknown_metrics:
+        raise ValueError(
+            "未知指标: "
+            f"{', '.join(unknown_metrics)}；可选指标: {', '.join(METRIC_CONFIG)}"
+        )
+    return metrics
 
 
 def normalize_stock_code(value):
@@ -265,6 +285,16 @@ def price_cache_path(cache_dir, code, start_date, end_date):
 
 def value_cache_path(cache_dir, code):
     return Path(cache_dir) / "value" / f"{code}.pkl"
+
+
+def cache_has_columns(cache_path, columns):
+    if not cache_path.exists():
+        return False
+    try:
+        df = pd.read_pickle(cache_path)
+        return all(column in df.columns for column in columns)
+    except Exception:
+        return False
 
 
 def normalize_price_df(df):
@@ -431,6 +461,7 @@ def fetch_value_page(symbol, page_number, args):
 def normalize_value_json(rows):
     columns_map = {
         "TRADE_DATE": DATE_COLUMN,
+        "TOTAL_MARKET_CAP": "总市值",
         "NOTLIMITED_MARKETCAP_A": "流通市值",
         "PE_TTM": "PE(TTM)",
     }
@@ -482,7 +513,11 @@ def fetch_value_all_pages(code, args):
 def load_or_fetch_value(code, args, failures):
     cache_path = value_cache_path(args.cache_dir, code)
     if cache_path.exists() and not args.force_refresh:
-        return pd.read_pickle(cache_path), "缓存"
+        cached_df = pd.read_pickle(cache_path)
+        required_columns = [DATE_COLUMN] + list(VALUE_METRICS.values())
+        if all(column in cached_df.columns for column in required_columns):
+            return cached_df, "缓存"
+        print(f"{code} 估值缓存缺少新字段，重新请求。", flush=True)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -543,12 +578,13 @@ def write_metric_workbook(metric, codes, date_labels, name_map, args, output_dir
     return output_path
 
 
-def save_run_summary(output_dir, failures, code_summary):
+def save_run_summary(output_dir, failures, code_summary, selected_metrics):
     output_path = Path(output_dir) / "run_summary.xlsx"
     field_notes = pd.DataFrame(
         [
             {"输出文件": metric, "数据源": source, "源字段": source_col}
             for metric, (source, source_col) in METRIC_CONFIG.items()
+            if metric in selected_metrics
         ]
     )
     with pd.ExcelWriter(output_path) as writer:
@@ -561,6 +597,9 @@ def save_run_summary(output_dir, failures, code_summary):
 def main():
     configure_stdout()
     args = parse_args()
+    selected_metrics = parse_selected_metrics(args.metrics)
+    needs_price = any(METRIC_CONFIG[metric][0] == "price" for metric in selected_metrics)
+    needs_value = any(METRIC_CONFIG[metric][0] == "value" for metric in selected_metrics)
     codes = load_stock_codes(args.stock_list, args.limit)
     dates = get_trade_dates(args.start_date, args.end_date)
     date_labels = [date.strftime("%Y-%m-%d") for date in dates]
@@ -575,6 +614,7 @@ def main():
     print(f"日期范围: {date_labels[0]} 至 {date_labels[-1]}")
     print(f"缓存目录: {args.cache_dir}")
     print(f"输出目录: {output_dir}")
+    print(f"输出指标: {', '.join(selected_metrics)}")
     print(f"行情源: {args.price_source}")
     print(
         f"股票级等待: {args.min_wait}-{args.max_wait} 秒 | "
@@ -590,18 +630,36 @@ def main():
         progress = idx / len(codes)
         elapsed = time.monotonic() - run_start
         eta = (elapsed / (idx - 1) * (len(codes) - idx + 1)) if idx > 1 else 0
-        price_cached = price_cache_path(args.cache_dir, code, args.start_date, args.end_date).exists() and not args.force_refresh
-        value_cached = value_cache_path(args.cache_dir, code).exists() and not args.force_refresh
+        price_cache_path_current = price_cache_path(args.cache_dir, code, args.start_date, args.end_date)
+        value_cache_path_current = value_cache_path(args.cache_dir, code)
+        price_cached = (
+            needs_price
+            and price_cache_path_current.exists()
+            and not args.force_refresh
+        )
+        value_cached = (
+            needs_value
+            and cache_has_columns(value_cache_path_current, [DATE_COLUMN] + list(VALUE_METRICS.values()))
+            and not args.force_refresh
+        )
         print(
             f"[{idx}/{len(codes)} {progress:.1%}] 开始 {code} | "
             f"elapsed {format_duration(elapsed)} | ETA {format_duration(eta)} | "
-            f"行情 {'缓存' if price_cached else '请求'} | "
-            f"估值 {'缓存' if value_cached else '请求'}",
+            f"行情 {('跳过' if not needs_price else ('缓存' if price_cached else '请求'))} | "
+            f"估值 {('跳过' if not needs_value else ('缓存' if value_cached else '请求'))}",
             flush=True,
         )
 
-        price_df, price_source = load_or_fetch_price(code, args, failures)
-        value_df, value_source = load_or_fetch_value(code, args, failures)
+        if needs_price:
+            price_df, price_source = load_or_fetch_price(code, args, failures)
+        else:
+            price_df, price_source = pd.DataFrame(), "跳过"
+
+        if needs_value:
+            value_df, value_source = load_or_fetch_value(code, args, failures)
+        else:
+            value_df, value_source = pd.DataFrame(), "跳过"
+
         price_in_range = filter_date_range(price_df, args.start_date, args.end_date)
         value_in_range = filter_date_range(value_df, args.start_date, args.end_date)
 
@@ -626,11 +684,11 @@ def main():
         )
 
     output_paths = []
-    for metric in METRIC_CONFIG:
+    for metric in selected_metrics:
         print(f"正在生成 {metric}.xlsx", flush=True)
         output_paths.append(write_metric_workbook(metric, codes, date_labels, name_map, args, output_dir))
 
-    summary_path = save_run_summary(output_dir, failures, code_summary)
+    summary_path = save_run_summary(output_dir, failures, code_summary, selected_metrics)
 
     print("生成完成:")
     for path in output_paths:
@@ -641,6 +699,12 @@ def main():
         f"python -u get_stock_daily_metrics.py --start-date {FULL_START_DATE} "
         f"--end-date {FULL_END_DATE} --min-wait 0.2 --max-wait 0.6 "
         f"--chunk-min-wait 0.02 --chunk-max-wait 0.08 --price-source tencent"
+    )
+    print(
+        "仅导出总市值示例: "
+        f"python -u get_stock_daily_metrics.py --start-date {FULL_START_DATE} "
+        f"--end-date {FULL_END_DATE} --metrics 总市值 "
+        f"--min-wait 0.2 --max-wait 0.6"
     )
 
 
