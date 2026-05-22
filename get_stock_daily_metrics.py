@@ -13,9 +13,9 @@ from openpyxl import Workbook
 
 
 DEFAULT_START_DATE = "20260511"
-DEFAULT_END_DATE = "20260512"
+DEFAULT_END_DATE = "20260521"
 FULL_START_DATE = "20050101"
-FULL_END_DATE = "20260512"
+FULL_END_DATE = "20260521"
 
 DATE_COLUMN = "日期"
 CODE_COLUMN = "股票代码"
@@ -27,6 +27,16 @@ PRICE_METRICS = {
     "收盘价": "收盘",
     "最高价": "最高",
     "最低价": "最低",
+}
+PRICE_ADJUST_MAP = {
+    "none": "",
+    "qfq": "qfq",
+    "hfq": "hfq",
+}
+TENCENT_ADJUST_MAP = {
+    "none": "day",
+    "qfq": "qfqday",
+    "hfq": "hfqday",
 }
 VALUE_METRICS = {
     "总市值": "总市值",
@@ -63,7 +73,7 @@ def parse_args():
     )
     parser.add_argument("--stock-list", default="清单2.xlsx", help="个股清单 Excel 路径")
     parser.add_argument("--start-date", default=DEFAULT_START_DATE, help="开始日期, 例如 20050101")
-    parser.add_argument("--end-date", default=DEFAULT_END_DATE, help="结束日期, 例如 20260512")
+    parser.add_argument("--end-date", default=DEFAULT_END_DATE, help="结束日期, 例如 20260521")
     parser.add_argument(
         "--cache-dir",
         default="stock_daily_metrics_cache",
@@ -106,6 +116,12 @@ def parse_args():
         default="tencent",
         help="日行情来源；默认腾讯，auto 表示优先东财，失败后切到腾讯",
     )
+    parser.add_argument(
+        "--price-adjust",
+        choices=list(PRICE_ADJUST_MAP),
+        default="none",
+        help="价格复权方式；none 不复权，qfq 前复权，hfq 后复权",
+    )
     parser.add_argument("--force-refresh", action="store_true", help="忽略已有缓存重新请求")
     parser.add_argument(
         "--metrics",
@@ -143,14 +159,21 @@ def normalize_stock_code(value):
     if not code:
         return ""
 
+    if code in {CODE_COLUMN, "证券代码", "代码"}:
+        return ""
+
     if code.endswith(".0") and code[:-2].isdigit():
         code = code[:-2]
 
     if "." in code:
         number, suffix = code.split(".", 1)
-        if number.isdigit():
+        suffix = suffix.upper()
+        if number.isdigit() and suffix in {"SH", "SZ", "BJ"}:
             return f"{number.zfill(6)}.{suffix}"
-        return code
+        return ""
+
+    if code[:2] in {"SH", "SZ", "BJ"} and code[2:].isdigit():
+        return normalize_stock_code(f"{code[2:]}.{code[:2]}")
 
     if code.isdigit():
         number = code.zfill(6)
@@ -162,7 +185,7 @@ def normalize_stock_code(value):
             return f"{number}.BJ"
         return number
 
-    return code
+    return ""
 
 
 def code_to_symbol(code):
@@ -279,8 +302,8 @@ def load_or_fetch_name_map(codes, args, failures):
     return build_name_map_from_lookup(codes, lookup)
 
 
-def price_cache_path(cache_dir, code, start_date, end_date):
-    return Path(cache_dir) / "price" / f"{code}_{start_date}_{end_date}.pkl"
+def price_cache_path(cache_dir, code, start_date, end_date, price_adjust):
+    return Path(cache_dir) / "price" / price_adjust / f"{code}_{start_date}_{end_date}.pkl"
 
 
 def value_cache_path(cache_dir, code):
@@ -326,7 +349,7 @@ def fetch_price_eastmoney(code, args):
         period="daily",
         start_date=args.start_date,
         end_date=args.end_date,
-        adjust="",
+        adjust=PRICE_ADJUST_MAP[args.price_adjust],
         timeout=args.timeout,
     )
     return normalize_price_df(raw_df)
@@ -349,9 +372,11 @@ def tencent_symbol(code):
 
 def fetch_price_tencent_period(symbol, start_year, end_year, args):
     url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+    kline_type = TENCENT_ADJUST_MAP[args.price_adjust]
+    adjust_param = PRICE_ADJUST_MAP[args.price_adjust]
     params = {
-        "_var": f"kline_day{start_year}",
-        "param": f"{symbol},day,{start_year}-01-01,{end_year}-12-31,640,",
+        "_var": f"kline_{kline_type}{start_year}",
+        "param": f"{symbol},day,{start_year}-01-01,{end_year}-12-31,640,{adjust_param}",
         "r": str(random.random()),
     }
     response = requests.get(url, params=params, timeout=args.timeout)
@@ -360,7 +385,7 @@ def fetch_price_tencent_period(symbol, start_year, end_year, args):
     json_text = text[text.find("={") + 1 :]
     data_json = json.loads(json_text)
     symbol_data = (data_json.get("data") or {}).get(symbol) or {}
-    return symbol_data.get("day") or []
+    return symbol_data.get(kline_type) or []
 
 
 def fetch_price_tencent(code, args):
@@ -404,7 +429,9 @@ def fetch_price_tencent(code, args):
 
 
 def load_or_fetch_price(code, args, failures):
-    cache_path = price_cache_path(args.cache_dir, code, args.start_date, args.end_date)
+    cache_path = price_cache_path(
+        args.cache_dir, code, args.start_date, args.end_date, args.price_adjust
+    )
     if cache_path.exists() and not args.force_refresh:
         cached_df = normalize_price_df(pd.read_pickle(cache_path))
         pd.to_pickle(cached_df, cache_path)
@@ -541,7 +568,9 @@ def filter_date_range(df, start_date, end_date):
 def load_metric_series(code, metric, args, date_labels):
     source, source_col = METRIC_CONFIG[metric]
     if source == "price":
-        cache_path = price_cache_path(args.cache_dir, code, args.start_date, args.end_date)
+        cache_path = price_cache_path(
+            args.cache_dir, code, args.start_date, args.end_date, args.price_adjust
+        )
     else:
         cache_path = value_cache_path(args.cache_dir, code)
 
@@ -578,11 +607,16 @@ def write_metric_workbook(metric, codes, date_labels, name_map, args, output_dir
     return output_path
 
 
-def save_run_summary(output_dir, failures, code_summary, selected_metrics):
+def save_run_summary(output_dir, failures, code_summary, selected_metrics, args):
     output_path = Path(output_dir) / "run_summary.xlsx"
     field_notes = pd.DataFrame(
         [
-            {"输出文件": metric, "数据源": source, "源字段": source_col}
+            {
+                "输出文件": metric,
+                "数据源": source,
+                "源字段": source_col,
+                "价格复权": args.price_adjust if source == "price" else "",
+            }
             for metric, (source, source_col) in METRIC_CONFIG.items()
             if metric in selected_metrics
         ]
@@ -616,6 +650,7 @@ def main():
     print(f"输出目录: {output_dir}")
     print(f"输出指标: {', '.join(selected_metrics)}")
     print(f"行情源: {args.price_source}")
+    print(f"价格复权: {args.price_adjust}")
     print(
         f"股票级等待: {args.min_wait}-{args.max_wait} 秒 | "
         f"腾讯分块等待: {args.chunk_min_wait}-{args.chunk_max_wait} 秒"
@@ -630,7 +665,9 @@ def main():
         progress = idx / len(codes)
         elapsed = time.monotonic() - run_start
         eta = (elapsed / (idx - 1) * (len(codes) - idx + 1)) if idx > 1 else 0
-        price_cache_path_current = price_cache_path(args.cache_dir, code, args.start_date, args.end_date)
+        price_cache_path_current = price_cache_path(
+            args.cache_dir, code, args.start_date, args.end_date, args.price_adjust
+        )
         value_cache_path_current = value_cache_path(args.cache_dir, code)
         price_cached = (
             needs_price
@@ -688,7 +725,7 @@ def main():
         print(f"正在生成 {metric}.xlsx", flush=True)
         output_paths.append(write_metric_workbook(metric, codes, date_labels, name_map, args, output_dir))
 
-    summary_path = save_run_summary(output_dir, failures, code_summary, selected_metrics)
+    summary_path = save_run_summary(output_dir, failures, code_summary, selected_metrics, args)
 
     print("生成完成:")
     for path in output_paths:
@@ -698,7 +735,8 @@ def main():
         "全量运行命令示例: "
         f"python -u get_stock_daily_metrics.py --start-date {FULL_START_DATE} "
         f"--end-date {FULL_END_DATE} --min-wait 0.2 --max-wait 0.6 "
-        f"--chunk-min-wait 0.02 --chunk-max-wait 0.08 --price-source tencent"
+        f"--chunk-min-wait 0.02 --chunk-max-wait 0.08 --price-source tencent "
+        f"--price-adjust hfq"
     )
     print(
         "仅导出总市值示例: "

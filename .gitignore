@@ -16,6 +16,20 @@ margin_report*/
 margin_account_report*/
 stock_daily_metrics_cache/
 stock_daily_metrics_report*/
+stock_daily_metrics_hfq_*/
+stock_daily_value*/
+tinyshare_value_metrics_cache/
+tinyshare_value_metrics*/
 /融资买入额.xlsx
 /融资余额.xlsx
+/开盘价.xlsx
+/收盘价.xlsx
+/最高价.xlsx
+/最低价.xlsx
+/总市值.xlsx
+/流动市值.xlsx
+/市盈率-动态.xlsx
 /run_summary.xlsx
+
+# Local market data inputs
+/个股基本信息.xlsx
