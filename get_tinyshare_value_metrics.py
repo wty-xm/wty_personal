@@ -21,9 +21,34 @@ DATE_COLUMN = "日期"
 NAME_COLUMN = "股票名称"
 
 METRIC_COLUMNS = {
+    "收盘价": "close",
+    "换手率": "turnover_rate",
+    "换手率-自由流通股": "turnover_rate_f",
+    "量比": "volume_ratio",
+    "市盈率": "pe",
+    "市盈率-动态": "pe_ttm",
+    "市净率": "pb",
+    "市销率": "ps",
+    "市销率-TTM": "ps_ttm",
+    "股息率": "dv_ratio",
+    "股息率-TTM": "dv_ttm",
+    "总股本": "total_share",
+    "流通股本": "float_share",
+    "自由流通股本": "free_share",
     "总市值": "total_mv",
     "流动市值": "circ_mv",
-    "市盈率-动态": "pe_ttm",
+}
+DEFAULT_METRICS = ",".join(METRIC_COLUMNS)
+METRIC_UNITS = {
+    "换手率": "%",
+    "换手率-自由流通股": "%",
+    "股息率": "%",
+    "股息率-TTM": "%",
+    "总股本": "万股",
+    "流通股本": "万股",
+    "自由流通股本": "万股",
+    "总市值": "万元",
+    "流动市值": "万元",
 }
 OUTPUT_COLUMNS = [DATE_COLUMN] + list(METRIC_COLUMNS.values())
 
@@ -37,7 +62,7 @@ def configure_stdout():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="使用 tinyshare daily_basic 下载总市值、流动市值和动态市盈率，并生成横向矩阵 Excel。"
+        description="使用 tinyshare daily_basic 下载每日指标，并生成横向矩阵 Excel。"
     )
     parser.add_argument("--stock-list", default="个股基本信息.xlsx", help="个股清单 Excel 路径")
     parser.add_argument("--start-date", default=DEFAULT_START_DATE, help="开始日期, 例如 20050101")
@@ -50,8 +75,8 @@ def parse_args():
     )
     parser.add_argument(
         "--metrics",
-        default="总市值,流动市值,市盈率-动态",
-        help="逗号分隔的输出指标；可选: 总市值,流动市值,市盈率-动态",
+        default=DEFAULT_METRICS,
+        help=f"逗号分隔的输出指标；为空或默认表示全部。可选: {DEFAULT_METRICS}",
     )
     parser.add_argument("--limit", type=int, default=0, help="仅处理前 N 只股票；0 表示全部")
     parser.add_argument("--min-wait", type=float, default=0.2, help="每只股票请求后的最小等待秒数")
@@ -64,6 +89,9 @@ def parse_args():
 
 
 def parse_selected_metrics(metrics_text):
+    if not metrics_text:
+        return list(METRIC_COLUMNS)
+
     metrics = [item.strip() for item in metrics_text.split(",") if item.strip()]
     unknown_metrics = [metric for metric in metrics if metric not in METRIC_COLUMNS]
     if unknown_metrics:
@@ -184,7 +212,7 @@ def fetch_daily_basic(pro, code, args):
         ts_code=code,
         start_date=args.start_date,
         end_date=args.end_date,
-        fields="ts_code,trade_date,total_mv,circ_mv,pe_ttm",
+        fields="ts_code,trade_date," + ",".join(METRIC_COLUMNS.values()),
     )
     return normalize_value_df(raw_df)
 
@@ -280,7 +308,7 @@ def save_run_summary(output_dir, failures, code_summary, selected_metrics, date_
                 "输出文件": metric,
                 "接口": "tinyshare daily_basic",
                 "源字段": METRIC_COLUMNS[metric],
-                "单位": "万元" if metric in {"总市值", "流动市值"} else "",
+                "单位": METRIC_UNITS.get(metric, ""),
             }
             for metric in selected_metrics
         ]
